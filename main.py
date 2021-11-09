@@ -1,5 +1,3 @@
-import os
-
 
 def save_advert(event, context):
     """Background Cloud Function to be triggered by Pub/Sub API Results
@@ -160,6 +158,7 @@ def request_api(event, context):
     import base64
     import urllib.parse
     from google.cloud import pubsub_v1
+    import os
 
     publisher = pubsub_v1.PublisherClient()
     topic = 'projects/hades-cloud-330810/topics/api-results'
