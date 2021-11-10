@@ -1,4 +1,3 @@
-
 def save_advert(event, context):
     """Background Cloud Function to be triggered by Pub/Sub API Results
 
@@ -50,7 +49,8 @@ def save_advert(event, context):
         "price_key": "sellingStatus",
         "current_price_key": "currentPrice",
         "value_key": "__value__",
-        "currency_key": "@currencyId"
+        "currency_key": "@currencyId",
+        "seller_key": "sellerInfo"
 
     }
 
@@ -86,6 +86,14 @@ def save_advert(event, context):
 
                 if 'galleryURL' in dictionary_advert:
                     gallery_images.append(advert_dictionary['galleryURL'][0])
+
+                # unpack and append seller info
+
+                if 'sellerInfo' in dictionary_advert:
+                    seller = advert_dictionary['sellerInfo'][0]
+                    advert['sellerUserName'] = ''.join(seller['sellerUserName'])
+                    advert['feedbackScore'] = ''.join(seller['feedbackScore'])
+                    advert['positiveFeedbackPercent'] = ''.join(seller['positiveFeedbackPercent'])
 
                 for key, value in dictionary_advert.items():
                     # print(f'{key}:{value}')
@@ -125,6 +133,11 @@ def unpack_dictionary(dictionary, key_names):
 
     key_values = {}
 
+    if key_names['seller_key'] in dictionary:
+        nested_dictionary = dictionary.get(key_names['seller_key'])[0]
+        for seller_key in nested_dictionary:
+            key_values[seller_key] = ''.join(str(element) for element in nested_dictionary.get(seller_key))
+
     if key_names['price_key'] in dictionary:
         nested_dict = dictionary.get(key_names['price_key'])[0]
 
@@ -163,7 +176,7 @@ def request_api(event, context):
     publisher = pubsub_v1.PublisherClient()
     topic = 'projects/hades-cloud-330810/topics/api-results'
 
-    app_name=os.environ.get("APPNAME")
+    app_name = os.environ.get("APPNAME")
 
     keywords = []
 
