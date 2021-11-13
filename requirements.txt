@@ -2,3 +2,4 @@ google-cloud-datastore
 google-cloud-pubsub
 requests
 google-cloud-storage
+google-cloud-vision
