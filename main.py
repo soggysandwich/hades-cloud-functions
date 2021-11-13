@@ -23,27 +23,21 @@ def save_advert(event, context):
         None. The output is written to Cloud Logging.
     """
     import base64
+    import uuid
+    import re
     import json
-
     from datetime import datetime, timezone
     from google.cloud import datastore
     datastore_client = datastore.Client()
 
-    # The kind(table) to save data in datastore
+    # The kind(table) to save data in datastore and unique key as id
     kind = "ebay-adverts"
+    unique_id = str(uuid.uuid4())
 
     # bucket to save images
     bucket = 'hades-bucket'
 
-    # The Cloud Datastore key for the new entity
-    advert_key = datastore_client.key(kind)
-
-    # Prepares the new entity
-    advert = datastore.Entity(key=advert_key, exclude_from_indexes=(
-        'condition', 'listingInfo', 'primaryCategory', 'sellingStatus', 'shippingInfo'))
-
-    # setup the list to capture the gallery urls
-    gallery_images = []
+    pattern = re.compile('[~\-a-zA-Z0-9]{16}')
 
     key_names = {
         "price_key": "sellingStatus",
@@ -57,64 +51,43 @@ def save_advert(event, context):
     # get the string data from the event and convert into a dictionary
     if 'data' in event:
         data = base64.b64decode(event['data']).decode('utf-8')
-        print(f'the data is {data}')
-        adverts = json.loads(data)
+        advert_dict = json.loads(data)
 
     else:
         print(f'Error: There was no data for {context.event_id} !')
-        adverts = {}
+        advert_dict = {}
 
-    find_items_by_keyword_list = adverts['findItemsByKeywordsResponse']
-    # print(find_items_by_keyword_list)
+    dictionary_advert = unpack_dictionary(advert_dict, key_names)
+    # The Cloud Datastore key for the new entity
+    advert_key = datastore_client.key(kind, unique_id)
+    advert = datastore.Entity(key=advert_key, exclude_from_indexes=(
+        'condition', 'listingInfo', 'primaryCategory', 'sellingStatus', 'shippingInfo', 'sellerInfo'))
 
-    for search_result in find_items_by_keyword_list:
+    if 'galleryURL' in dictionary_advert:
+        gallery_url = dictionary_advert['galleryURL']
+        image_id = pattern.search(gallery_url)
 
-        search_dictionary = (search_result['searchResult'][0])
+        if image_id and ('itemId' in dictionary_advert):
+            image_url = f'https://i.ebayimg.com/images/g/{image_id.group()}/s-l1600.jpg'
+            get_images(image_url, unique_id, bucket)  # unique_id is the same as the datastore key for name of image
 
-        # list of all the adverts and batch update datastore
-        advert_list = (search_dictionary['item'])
+        for key, value in dictionary_advert.items():
+            advert[key] = value
+            advert['found_date'] = datetime.now(timezone.utc)
 
-        with datastore_client.batch() as batch:
-            # get every advert and save to the datastore as a batch
-            for advert_dictionary in advert_list:
-                # print(advert_dictionary)
-                dictionary_advert = unpack_dictionary(advert_dictionary, key_names)
-                advert = datastore.Entity(key=advert_key, exclude_from_indexes=(
-                    'condition', 'listingInfo', 'primaryCategory', 'sellingStatus', 'shippingInfo'))
-
-                # append gallery url so can collect them and save to bucket
-
-                if 'galleryURL' in dictionary_advert:
-                    gallery_images.append(advert_dictionary['galleryURL'][0])
-
-                # unpack and append seller info
-
-                if 'sellerInfo' in dictionary_advert:
-                    seller = advert_dictionary['sellerInfo'][0]
-                    advert['sellerUserName'] = ''.join(seller['sellerUserName'])
-                    advert['feedbackScore'] = ''.join(seller['feedbackScore'])
-                    advert['positiveFeedbackPercent'] = ''.join(seller['positiveFeedbackPercent'])
-
-                for key, value in dictionary_advert.items():
-                    # print(f'{key}:{value}')
-                    advert[key] = value
-
-                advert['found_date'] = datetime.now(timezone.utc)
-                batch.put(advert)
-
-    get_images(gallery_images, bucket, '-')
+        datastore_client.put(advert)
 
 
-def get_images(gallery_images, bucket, folder_safe_name_replace):
+def get_images(image_url, blob_name, bucket):
     from google.cloud import storage
     import requests
     storage_client = storage.Client()
     bucket = storage_client.bucket(bucket)
 
-    for image in gallery_images[0:10]:
-        response = requests.get(image)
-
-        blob = bucket.blob(response.url.replace('/', folder_safe_name_replace))
+    response = requests.get(image_url)
+    # print(f' response code : {response.status_code}')
+    if response.status_code == 200:
+        blob = bucket.blob(blob_name)
         blob.upload_from_string(response.content)
 
 
@@ -206,9 +179,63 @@ def request_api(event, context):
             response = requests.get(url)
 
             data = response.json()
-            data = json.dumps(data)
-            data = data.encode('utf-8')
+            find_items_by_keyword_dict = data['findItemsByKeywordsResponse'][0]
 
-            # result = publisher.publish(topic, data, **attributes)
-            result = publisher.publish(topic, data)
-            print(f'published message {result.result()}')
+            search_results = find_items_by_keyword_dict['searchResult'][0]['item']
+
+            for advert in search_results:
+                advert = json.dumps(advert)
+
+                advert = advert.encode('utf-8')
+
+                # print(f'advert is : {advert}')
+
+                # result = publisher.publish(topic, data, **attributes)
+                result = publisher.publish(topic, advert)
+                # print(f'published message {result.result()}')
+
+
+def analyse_image(event, context):
+    """Background Cloud Function to be triggered by Cloud Storage.
+       This function takes an image from google-storage and sends to vision API and saves results in datastore
+    Args:
+        event (dict):  The dictionary with data specific to this type of event.
+                       The `data` field contains a description of the event in
+                       the Cloud Storage `object` format described here:
+                       https://cloud.google.com/storage/docs/json_api/v1/objects#resource
+        context (google.cloud.functions.Context): Metadata of triggering event.
+    Returns:
+
+    """
+    from google.cloud import vision
+    from google.cloud import datastore
+    labels = {}
+    kind = 'ebay-adverts'
+    print(f"Name : {event['name']}")
+
+    # print(f"gs://{event['bucket']}/{event['name']}")
+
+    vision_client = vision.ImageAnnotatorClient()
+    image = vision.Image()
+    image.source.image_uri = f"gs://{event['bucket']}/{event['name']}"
+
+    response = vision_client.label_detection(image)
+    logo_response = vision_client.logo_detection(image)
+
+    for label in response.label_annotations:
+        if label.score >= 0.80:
+            labels[label.description] = label.score
+
+    for logo in logo_response.logo_annotations:
+        if logo.score >= 0.80:
+            labels[logo.description] = logo.score
+            # print(f'logo description: {logo.description}    confidence level: {logo.score}  ')
+
+    if len(labels) > 0:
+        client = datastore.Client()
+        key = client.key(kind, str(event['name']))
+        advert = client.get(key)
+        print(f' entity {advert}')
+        print(f' labels {labels}')
+        advert['MachineLearning'] = labels
+        client.put(advert)
